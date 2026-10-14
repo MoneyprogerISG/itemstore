@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"myproject/internal/config"
 	"myproject/internal/handler"
@@ -9,6 +11,9 @@ import (
 	"myproject/internal/service"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -21,9 +26,37 @@ func main() {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
+	srv := &http.Server{
+		Addr:    cfg.Port,
+		Handler: mux,
+	}
+
 	slog.Info("сервер запущен", "port", cfg.Port)
-	if err := http.ListenAndServe(cfg.Port, mux); err != nil {
-		slog.Error("сервер оостановлен", "error", err)
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
+	case <-quit:
+		slog.Info("shutting down ...")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("graceful shutdown failed", "error", err)
+		_ = srv.Close()
 		os.Exit(1)
 	}
+	slog.Info("server stopped gracefully")
 }
